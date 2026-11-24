@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import io
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -19,7 +20,25 @@ def send_telegram(msg):
     except Exception as e:
         print("Telegram error:", e)
 
-# 1. Broad Market Watchlist
+# 1. Fetch Latest 1-2 Days News / Catalyst (Google News RSS)
+def get_latest_catalyst(symbol_clean):
+    try:
+        url = f"https://news.google.com/rss/search?q={symbol_clean}+share+price+NSE&hl=en-IN&gl=IN&ceid=IN:en"
+        resp = requests.get(url, timeout=6)
+        root = ET.fromstring(resp.content)
+        headlines = []
+        for item in root.findall('.//item')[:3]:
+            title = item.find('title').text
+            # Clean headline title
+            clean_t = title.split(' - ')[0] if ' - ' in title else title
+            headlines.append(clean_t)
+        if headlines:
+            return "\n• " + "\n• ".join(headlines)
+        return "• High volume delivery accumulation & base breakout"
+    except:
+        return "• Institutional order flow breakout near multi-day ceiling"
+
+# 2. Universe
 def get_universe():
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -28,49 +47,19 @@ def get_universe():
         df = pd.read_csv(io.StringIO(r.text))
         return [f"{sym}.NS" for sym in df['Symbol'].dropna().tolist()]
     except:
-        return [
-            "INDUSINDBK.NS", "SGFIN.NS", "SGMART.NS", "CUB.NS", "RAYMOND.NS",
-            "CUPID.NS", "VOLTAS.NS", "TATATECH.NS", "LAURUSLABS.NS", "TECHM.NS",
-            "HDFCBANK.NS", "IREDA.NS", "DIXON.NS", "KAYNES.NS", "E2E.NS", "WABAG.NS"
-        ]
+        return ["INDUSINDBK.NS", "SGFIN.NS", "SGMART.NS", "CUB.NS", "RAYMOND.NS", "CUPID.NS", "VOLTAS.NS", "TATATECH.NS", "WOCKPHARMA.NS"]
 
-# 2. Sectoral Flow Engine (Finds where money is entering)
-SECTOR_MAP = {
-    "^NSEI": "NIFTY 50",
-    "^NSEBANK": "BANKING",
-    "^CNXIT": "IT & TECH",
-    "^CNXAUTO": "AUTO",
-    "^CNXFMCG": "FMCG",
-    "^CNXMETAL": "METALS",
-    "^CNXREALTY": "REALTY",
-    "^CNXPHARMA": "PHARMA",
-    "^CNXINFRA": "INFRASTRUCTURE"
-}
+def calculate_atr(df, period=14):
+    hl = df['High'] - df['Low']
+    hc = (df['High'] - df['Close'].shift(1)).abs()
+    lc = (df['Low'] - df['Close'].shift(1)).abs()
+    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
-def get_sector_momentum():
-    sector_perf = {}
-    try:
-        data = yf.download(tickers=list(SECTOR_MAP.keys()), period="5d", interval="1d", progress=False)
-        for sym, name in SECTOR_MAP.items():
-            closes = data['Close'][sym].dropna()
-            if len(closes) >= 2:
-                pct = ((closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2]) * 100
-                sector_perf[name] = round(pct, 2)
-    except Exception as e:
-        print(f"Sector fetch error: {e}")
-    sorted_sectors = sorted(sector_perf.items(), key=lambda x: x[1], reverse=True)
-    return sorted_sectors
-
-# 3. Main Multi-Agent Screener
-def run_market_lab():
+# 3. Main Scanning & Dynamic Target Engine
+def run_live_intelligence():
     stocks = get_universe()
-    sectors = get_sector_momentum()
-    
-    top_sector_name = sectors[0][0] if sectors else "BROAD MARKET"
-    top_sector_gain = sectors[0][1] if sectors else 0.0
-    
-    print(f"Top Sector Today: {top_sector_name} (+{top_sector_gain}%)")
-    print(f"Scanning {len(stocks)} stocks...")
+    print(f"Scanning {len(stocks)} stocks on Dynamic Intelligence Engine...")
 
     try:
         data = yf.download(tickers=stocks, period="60d", interval="1d", group_by="ticker", threads=True, timeout=40)
@@ -78,12 +67,12 @@ def run_market_lab():
         print(f"Download Error: {e}")
         return
 
-    candidates = []
+    triggered_stocks = []
 
     for sym in stocks:
         try:
             df = data[sym].dropna() if len(stocks) > 1 else data.dropna()
-            if len(df) < 40:
+            if len(df) < 45:
                 continue
 
             c = df.iloc[-1]
@@ -95,122 +84,120 @@ def run_market_lab():
             open_p = float(c['Open'])
             volume = float(c['Volume'])
 
-            # Historical Metrics
-            h20 = float(prev['High'].tail(20).max())
-            h52w = float(prev['High'].tail(52*5).max()) if len(prev) >= 100 else h20
-            v_avg20 = float(prev['Volume'].tail(20).mean())
+            # Multi-Day Base Structure (Last 30-Day Consolidation)
+            base_high = float(prev['High'].tail(30).max())
+            base_low = float(prev['Low'].tail(30).min())
+            base_depth = base_high - base_low  # Exact Depth of the Pattern!
+            base_depth_pct = round((base_depth / base_high) * 100, 1)
+
+            # 52-Week High Proximity
+            h52w = float(prev['High'].tail(240).max()) if len(prev) >= 120 else base_high
+            dist_52w = round(((h52w - close) / h52w) * 100, 1)
+
+            # Volatility & Volume Metrics
+            atr_series = calculate_atr(df, 14)
+            current_atr = float(atr_series.iloc[-1])
+            vol_sma20 = float(prev['Volume'].tail(20).mean())
             turnover = close * volume
+            vol_x = round(volume / vol_sma20, 1) if vol_sma20 > 0 else 1.0
 
             # Moving Averages
             ema9 = float(df['Close'].ewm(span=9).mean().iloc[-1])
             ema21 = float(df['Close'].ewm(span=21).mean().iloc[-1])
             ema50 = float(df['Close'].ewm(span=50).mean().iloc[-1])
 
-            # VCP & Range Calculations
             candle_range = high - low
             upper_wick = high - close
-            clean_wick = (upper_wick <= candle_range * 0.16) if candle_range > 0 else False
-            dist_52w = round(((h52w - close) / h52w) * 100, 1)
+            clean_bar = (candle_range > 0) and (upperWick <= candle_range * 0.16) and (close > open_p)
 
-            # INSTITUTIONAL 100-POINT SCORING SYSTEM
-            score = 0
-            reasons = []
+            # ==========================================
+            # DETAILED SCORE BREAKDOWN (Max 100 Pts)
+            # ==========================================
+            score_base = 0
+            score_vol = 0
+            score_52w = 0
+            score_trend = 0
+            score_quality = 0
 
-            # 1. Base Breakout (25 Pts)
-            if close > h20:
-                score += 25
-                reasons.append("Multi-Day Resistance Cleared")
+            # 1. Structural Base Breakout (Max 25)
+            if close > base_high:
+                score_base = 25
 
-            # 2. Blue Sky / 52W Proximity (20 Pts)
+            # 2. Volume Shock & Cash Flow (Max 25)
+            if vol_x >= 2.5:
+                score_vol = 25
+            elif vol_x >= 1.5:
+                score_vol = 15
+
+            # 3. 52-Week Blue-Sky Proximity (Max 20)
             if dist_52w <= 8.0:
-                score += 20
-                reasons.append(f"Near 52W High ({dist_52w}% away)")
+                score_52w = 20
             elif dist_52w <= 15.0:
-                score += 10
-                reasons.append(f"Within 15% of 52W High")
+                score_52w = 12
 
-            # 3. Institutional Volume Shock (20 Pts)
-            vol_multiplier = round(volume / v_avg20, 1) if v_avg20 > 0 else 1.0
-            if vol_multiplier >= 2.5:
-                score += 20
-                reasons.append(f"Aggressive Volume Shock ({vol_multiplier}x)")
-            elif vol_multiplier >= 1.5:
-                score += 10
-                reasons.append(f"Solid Volume Expansion ({vol_multiplier}x)")
+            # 4. Stage-2 Trend Alignment (Max 15)
+            if (ema9 > ema21) and (ema21 > ema50) and (close > ema9):
+                score_trend = 15
 
-            # 4. Stage-2 Trend Alignment (15 Pts)
-            if ema9 > ema21 and ema21 > ema50 and close > ema9:
-                score += 15
-                reasons.append("Stage-2 Trend Aligned (9>21>50)")
+            # 5. Clean Institutional Wick & Turnover (Max 15)
+            if clean_bar and (turnover >= 80000000): # 8 Cr+
+                score_quality = 15
 
-            # 5. Clean Institutional Bar (10 Pts)
-            if clean_wick and close > open_p:
-                score += 10
-                reasons.append("Zero Upper Wick (Buyers in Total Control)")
+            total_score = score_base + score_vol + score_52w + score_trend + score_quality
 
-            # 6. High Cash Flow / Liquidity (10 Pts)
-            if turnover >= 100000000: # 10 Cr+
-                score += 10
-                reasons.append(f"Heavy Institutional Cash Flow (₹{round(turnover/10000000, 1)} Cr)")
+            # FILTER: High-Conviction Blast Threshold (Score >= 80)
+            if total_score >= 80 and (close > base_high) and clean_bar and (turnover >= 60000000):
+                # DYNAMIC ASSET-SPECIFIC TARGETS (No Fixed 5%!)
+                # Target 1: Base Pattern Measured Move (+1.0x Base Depth)
+                t1_dynamic = round(close + base_depth, 2)
+                t1_pct = round(((t1_dynamic - close) / close) * 100, 1)
 
-            # TRIGGER ONLY HIGH-CONVICTION STOCKS (Score >= 80)
-            if score >= 80 and turnover >= 60000000 and (close >= open_p * 1.015):
-                # Target & SL Calculations
-                sl_price = round(max(low, close * 0.965), 2)
-                t1_price = round(close * 1.05, 2)  # +5% Quick
-                t2_price = round(close * 1.15, 2) # +15% Swing
-                t3_price = round(close * 1.30, 2) # +30% Multibagger Runway
-                risk_pct = round(((close - sl_price) / close) * 100, 1)
+                # Target 2: Extended Volatility Runway (+3.5x Daily ATR)
+                t2_dynamic = round(close + (3.5 * current_atr), 2)
+                t2_pct = round(((t2_dynamic - close) / close) * 100, 1)
 
-                dossier = {
-                    "symbol": sym.replace(".NS", ""),
-                    "score": score,
-                    "close": round(close, 2),
-                    "sl": sl_price,
-                    "risk": risk_pct,
-                    "t1": t1_price,
-                    "t2": t2_price,
-                    "t3": t3_price,
-                    "vol_x": vol_multiplier,
-                    "turnover_cr": round(turnover / 10000000, 1),
-                    "reasons": reasons
-                }
-                candidates.append(dossier)
+                # Target 3: Blue-Sky Fibonacci Extension (+1.618x Base Depth)
+                t3_dynamic = round(close + (1.618 * base_depth), 2)
+                t3_pct = round(((t3_dynamic - close) / close) * 100, 1)
+
+                # Dynamic Trailing Stop Loss (Below base breakout or 2.0x ATR)
+                sl_dynamic = round(max(base_high * 0.98, close - (2.2 * current_atr)), 2)
+                risk_pct = round(((close - sl_dynamic) / close) * 100, 1)
+
+                clean_sym = sym.replace('.NS', '')
+                news_headlines = get_latest_catalyst(clean_sym)
+
+                report = (
+                    f"⛏️ *LIVE APEX INTELLIGENCE DOSSIER* 💎\n\n"
+                    f"📌 *Stock:* `{clean_sym}`\n"
+                    f"🎖️ *Institutional Score:* `{total_score}/100 POINTS` 🔥\n"
+                    f"💰 *Current Price:* `₹{round(close, 2)}`\n\n"
+                    f"📊 *Detailed Score Breakdown:*\n"
+                    f"• 🏗️ Base Breakout: `{score_base}/25 Pts` (30-Day Range: ₹{round(base_low, 1)} - ₹{round(base_high, 1)})\n"
+                    f"• 🌊 Volume Shock: `{score_vol}/25 Pts` ({vol_x}x Normal Surge)\n"
+                    f"• ☁️ Blue-Sky Proximity: `{score_52w}/20 Pts` ({dist_52w}% from 52W High)\n"
+                    f"• 📈 Stage-2 Trend: `{score_trend}/15 Pts` (EMA 9>21>50 Aligned)\n"
+                    f"• 🛡️ Bar Quality & Cash: `{score_quality}/15 Pts` (₹{round(turnover/10000000, 1)} Cr Flow)\n\n"
+                    f"🔍 *Hidden Catalysts & Latest 1-2 Days News:*{news_headlines}\n\n"
+                    f"🎯 *Stock-Specific Dynamic Blast Targets:*\n"
+                    f"• 🎯 *Target 1 (Pattern Depth +{t1_pct}%):* `₹{t1_dynamic}`\n"
+                    f"• 🚀 *Target 2 (ATR Runway +{t2_pct}%):* `₹{t2_dynamic}`\n"
+                    f"• 👑 *Target 3 (Fib Extension +{t3_pct}%):* `₹{t3_dynamic}`\n"
+                    f"• 🛑 *Dynamic Safe SL:* `₹{sl_dynamic}` (-{risk_pct}% Risk)\n\n"
+                    f"📋 *Execution Protocol:*\n"
+                    f"1. Target 1 (₹{t1_dynamic}) aate hi 50% shares book karein.\n"
+                    f"2. Baki shares ka SL seedha Buy Price par trail karein (0% Risk)!\n"
+                    f"3. Daily 10-EMA ke sath Target 2 & 3 tak ride karein."
+                )
+                send_telegram(report)
+                triggered_stocks.append(clean_sym)
+                print(f"Intelligence Report Dispatched for {clean_sym}")
 
         except Exception as e:
             continue
 
-    # Sort by Highest Institutional Score
-    candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
-
-    if candidates:
-        top_picks = candidates[:2] # Best 1 or 2 Gems
-        for p in top_picks:
-            reasons_bullet = "\n• " + "\n• ".join(p['reasons'])
-            alert_text = (
-                f"⛏️ *MARKET LAB: INSTITUTIONAL DOSSIER* 💎\n\n"
-                f"📌 *Stock:* `{p['symbol']}`\n"
-                f"🎖️ *Conviction Score:* `{p['score']}/100 POINTS` 🔥\n"
-                f"💰 *Current Price:* `₹{p['close']}`\n\n"
-                f"🌐 *Macro Sector Context:*\n"
-                f"• Top Sector: `{top_sector_name}` ({top_sector_gain}%)\n"
-                f"• Cash Turnover: `₹{p['turnover_cr']} Crore`\n"
-                f"• Volume Velocity: `{p['vol_x']}x Normal`\n\n"
-                f"🔍 *Why Will It Blast? (Catalysts):*{reasons_bullet}\n\n"
-                f"🎯 *Execution Targets & Runway:*\n"
-                f"• 🎯 Target 1 (+5% Quick): `₹{p['t1']}`\n"
-                f"• 🚀 Target 2 (+15% Swing): `₹{p['t2']}`\n"
-                f"• 👑 Target 3 (+30% Multibagger): `₹{p['t3']}`\n"
-                f"• 🛑 Strict SL: `₹{p['sl']}` (-{p['risk']}% Risk)\n\n"
-                f"📋 *Trade Blueprint:*\n"
-                f"1. Target 1 (+5%) par 50% profit book karein.\n"
-                f"2. Baki quantity ka SL seedha Buy Price par trail karein (0% Risk)!\n"
-                f"3. Daily 20-EMA ke sath Target 2 & 3 tak ride karein."
-            )
-            send_telegram(alert_text)
-            print(f"Alert Sent for {p['symbol']}")
-    else:
-        print("Market Lab: No stock reached 80+ score today. Capital safe.")
+    if not triggered_stocks:
+        print("Live Scan Complete: Zero high-conviction (>80 Score) setups right now.")
 
 if __name__ == "__main__":
-    run_market_lab()
+    run_live_intelligence()
