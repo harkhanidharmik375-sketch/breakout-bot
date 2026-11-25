@@ -201,3 +201,12 @@ def run_live_intelligence():
 
 if __name__ == "__main__":
     run_live_intelligence()
+* Uski jagah bas yeh kar dein:
+  ```python
+  if not triggered_stocks:
+    now_t = datetime.now().strftime("%I:%M %p")
+    send_telegram(
+        f"✅ *Live Scan Complete ({now_t} IST)*\n\nPoore 500 stocks check ho"
+        " gaye hain. Filhaal koi stock 80+ score nahi kar raha hai. Capital"
+        " 100% safe hai!"
+    )
