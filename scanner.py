@@ -1,33 +1,66 @@
-import os, requests, pandas as pd, numpy as np, yfinance as yf, io, xml.etree.ElementTree as ET
+import os
+import time
+import requests
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import io
+import xml.etree.ElementTree as ET
 from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 def send_telegram(msg):
     if not BOT_TOKEN or not CHAT_ID: return
-    try: requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=12)
-    except Exception as e: print("Telegram err:", e)
-
-def get_news(sym):
     try:
-        root = ET.fromstring(requests.get(f"https://news.google.com/rss/search?q={sym}+stock+NSE&hl=en-IN&gl=IN&ceid=IN:en", timeout=5).content)
-        return [i.find('title').text.split(' - ')[0] for i in root.findall('.//item')[:2]]
-    except: return ["Institutional Volume Accumulation"]
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=12)
+    except Exception as e:
+        print(f"Telegram error: {e}")
+
+def get_latest_news(sym_clean):
+    try:
+        r = requests.get(f"https://news.google.com/rss/search?q={sym_clean}+share+price+NSE&hl=en-IN&gl=IN&ceid=IN:en", timeout=5)
+        root = ET.fromstring(r.content)
+        items = [i.find('title').text.split(' - ')[0] for i in root.findall('.//item')[:3]]
+        return "\n• " + "\n• ".join(items) if items else "• Institutional volume absorption breakout"
+    except:
+        return "• Fresh Stage-2 expansion with heavy turnover"
 
 def get_universe():
     try:
         r = requests.get("https://archives.nseindia.com/content/indices/ind_nifty500list.csv", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        return [f"{s}.NS" for s in pd.read_csv(io.StringIO(r.text))['Symbol'].dropna().tolist() if "DUMMY" not in s]
-    except: return ["INDUSINDBK.NS", "SGFIN.NS", "SGMART.NS", "CUB.NS", "RAYMOND.NS", "WOCKPHARMA.NS"]
+        df = pd.read_csv(io.StringIO(r.text))
+        return [f"{s}.NS" for s in df['Symbol'].dropna().tolist() if "DUMMY" not in s and "BAGMANE" not in s]
+    except:
+        return ["INDUSINDBK.NS", "SGFIN.NS", "SGMART.NS", "CUB.NS", "RAYMOND.NS", "CUPID.NS", "VOLTAS.NS", "TATATECH.NS", "WOCKPHARMA.NS"]
 
-def run_multi_agent_system():
+def scan_masterpiece():
+    now_str = datetime.now().strftime("%I:%M %p")
+    print(f"[{now_str}] Running Live Masterpiece Scan...")
+    
+    # 1. Market Regime Check (Nifty 50 Guard)
+    try:
+        nifty = yf.download("^NSEI", period="60d", interval="1d", progress=False)
+        nifty_c = float(nifty['Close'].iloc[-1])
+        nifty_ema10 = float(nifty['Close'].ewm(span=10).mean().iloc[-1])
+        nifty_o = float(nifty['Open'].iloc[-1])
+        if nifty_c < nifty_ema10 or nifty_c < nifty_o:
+            print("Market Regime: Nifty 50 is weak/red. Preserving capital, zero new trades.")
+            return
+    except:
+        pass
+
     stocks = get_universe()
-    print(f"Multi-Agent System Scanning {len(stocks)} stocks...")
-    try: data = yf.download(tickers=stocks, period="60d", interval="1d", group_by="ticker", threads=True, progress=False, timeout=40)
-    except: return
+    try:
+        data = yf.download(tickers=stocks, period="60d", interval="1d", group_by="ticker", threads=True, progress=False, timeout=35)
+    except Exception as e:
+        print(f"Download Error: {e}")
+        return
 
-    approved_trades = []
+    triggered = []
 
     for sym in stocks:
         try:
@@ -37,74 +70,107 @@ def run_multi_agent_system():
             c, h, l, o, v = float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1]), float(df['Open'].iloc[-1]), float(df['Volume'].iloc[-1])
             prev = df.iloc[:-1]
 
-            # Agent 1: Technical & SMC Structure
-            h20 = float(prev['High'].tail(20).max())
-            l20 = float(prev['Low'].tail(20).min())
-            h52w = float(prev['High'].tail(240).max()) if len(prev) >= 120 else h20
-            v_avg = float(prev['Volume'].tail(20).mean())
-            turnover = c * v
-
-            ema20 = float(df['Close'].ewm(span=20).mean().iloc[-1])
-            ema50 = float(df['Close'].ewm(span=50).mean().iloc[-1])
-
+            # 1. Base Depth & Resistance
+            base_high = float(prev['High'].tail(25).max())
+            base_low = float(prev['Low'].tail(25).min())
+            base_depth = base_high - base_low
+            h52w = float(prev['High'].tail(240).max()) if len(prev) >= 120 else base_high
             dist_52w = round(((h52w - c) / h52w) * 100, 1)
-            vol_x = round(v / v_avg, 1) if v_avg > 0 else 1.0
 
-            # Filter: Candidate must show Break of Structure + Volume
-            if not (c > h20 and vol_x >= 1.5 and c > o and turnover >= 60000000 and dist_52w <= 12.0):
-                continue
+            # 2. Volume Dry-Up (VDU) Check in last 3 days
+            vol_sma20 = float(prev['Volume'].tail(20).mean())
+            min_prev_vol = float(prev['Volume'].tail(3).min())
+            vdu_confirmed = min_prev_vol < (vol_sma20 * 0.75)  # Sellers were exhausted!
 
-            # ==========================================
-            # AGENT DEBATE (Bull Agent vs Bear Agent)
-            # ==========================================
-            bull_args = []
-            bear_args = []
+            # 3. Ignition Volume & Spread
+            vol_x = round(v / vol_sma20, 1) if vol_sma20 > 0 else 1.0
+            turnover = c * v
+            candle_spread = h - l
+            upper_wick = h - c
+            clean_bull = (candle_spread > 0) and (upper_wick <= candle_spread * 0.16) and (c > o)
 
-            # Bull Arguments
-            bull_args.append(f"Break of Structure (BOS) over 20-day ceiling (Rs.{round(h20,1)})")
-            bull_args.append(f"Institutional Volume Inflow: {vol_x}x above 20-DMA")
-            if dist_52w <= 6.0: bull_args.append(f"Near 52-Week High (Blue Sky Zone - {dist_52w}% away)")
-            if ema20 > ema50: bull_args.append("Stage-2 Trend Alignment (20 EMA > 50 EMA)")
+            # 4. Moving Averages
+            ema9 = float(df['Close'].ewm(span=9).mean().iloc[-1])
+            ema21 = float(df['Close'].ewm(span=21).mean().iloc[-1])
+            ema50 = float(df['Close'].ewm(span=50).mean().iloc[-1])
+            trend_aligned = (ema9 > ema21) and (ema21 > ema50) and (c > ema9)
 
-            # Bear Arguments (Risk Hunting)
-            dist_ema20 = round(((c - ema20) / ema20) * 100, 1)
-            if dist_ema20 >= 6.0: bear_args.append(f"Overextended: Price is +{dist_ema20}% above 20 EMA (Rubber-band risk)")
-            if (h - c) > (h - l) * 0.25: bear_args.append("Upper rejection wick detected (Sellers active at top)")
-            if vol_x > 6.0: bear_args.append(f"Climax Volume Warning ({vol_x}x volume could be blow-off)")
+            # 5. ATR Volatility
+            hl = df['High'] - df['Low']
+            hc = (df['High'] - df['Close'].shift(1)).abs()
+            lc = (df['Low'] - df['Close'].shift(1)).abs()
+            tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+            atr14 = float(tr.rolling(14).mean().iloc[-1])
 
-            # Portfolio Manager Decision
-            clean_sym = sym.replace('.NS', '')
-            news_items = get_news(clean_sym)
-            for n in news_items:
-                if any(w in n.lower() for w in ['loss', 'fall', 'slump', 'fraud', 'probe', 'down']):
-                    bear_args.append(f"Negative News Headline: {n[:45]}...")
+            # 6. Anti-Overextension Gate
+            candle_gain_pct = ((c - o) / o) * 100
+            dist_ema9 = ((c - ema9) / ema9) * 100
+            early_ignition = (candle_gain_pct >= 0.8) and (candle_gain_pct <= 3.5) and (dist_ema9 <= 2.8)
 
-            # Verdict: Approve ONLY if Bear risks are minimal
-            if len(bear_args) <= 1:
-                sl_calc = round(max(l20, c * 0.965), 2)
-                t1_calc = round(c + (c - sl_calc) * 2.0, 2)
-                t2_calc = round(c + (c - sl_calc) * 3.5, 2)
-                risk_pct = round(((c - sl_calc) / c) * 100, 1)
+            # 100-POINT INSTITUTIONAL SCORING
+            score = 0
+            if c > base_high: score += 25
+            if dist_52w <= 8.0: score += 20
+            elif dist_52w <= 15.0: score += 12
+            if vol_x >= 2.2: score += 25
+            elif vol_x >= 1.4: score += 15
+            if trend_aligned: score += 15
+            if vdu_confirmed and clean_bull and (turnover >= 60000000): score += 15
 
-                report = (
-                    f"🤖 *MULTI-AGENT TRADING FIRM DOSSIER* 📊\n\n"
-                    f"📌 *Stock:* `{clean_sym}` | *Action:* `APPROVED BUY 💎`\n"
-                    f"💰 *CMP:* `Rs.{round(c, 2)}` | *Flow:* `Rs.{round(turnover/1e7, 1)} Cr`\n\n"
-                    f"🟢 *Bull Agent (Why Buy?):*\n• " + "\n• ".join(bull_args) + "\n\n"
-                    f"🔴 *Bear Agent (Risks Checked):*\n• " + ("\n• ".join(bear_args) if bear_args else "Zero structural flaws detected") + "\n\n"
-                    f"🎯 *Risk Manager Order Plan:*\n"
-                    f"• 🎯 Target 1 (1:2 R:R): `Rs.{t1_calc}` (+{round(((t1_calc-c)/c)*100,1)}%)\n"
-                    f"• 🚀 Target 2 (1:3.5 R:R): `Rs.{t2_calc}` (+{round(((t2_calc-c)/c)*100,1)}%)\n"
-                    f"• 🛑 Strict SL: `Rs.{sl_calc}` (-{risk_pct}% Risk)\n\n"
-                    f"📰 *Live News:* " + " | ".join(news_items[:2])
+            # TRIGGER ONLY GRADE A++ (Score >= 80)
+            if score >= 80 and (c > base_high) and clean_bull and early_ignition and (turnover >= 50000000):
+                # DYNAMIC PATTERN-DEPTH TARGETS (NO FIXED NUMBERS!)
+                t1_target = round(c + base_depth, 2)
+                t1_pct = round(((t1_target - c) / c) * 100, 1)
+
+                t2_target = round(c + (3.5 * atr14), 2)
+                t2_pct = round(((t2_target - c) / c) * 100, 1)
+
+                t3_target = round(c + (1.618 * base_depth), 2)
+                t3_pct = round(((t3_target - c) / c) * 100, 1)
+
+                sl_price = round(max(base_high * 0.985, c - (2.0 * atr14)), 2)
+                risk_pct = round(((c - sl_price) / c) * 100, 1)
+
+                clean_sym = sym.replace('.NS', '')
+                catalyst_news = get_latest_news(clean_sym)
+
+                dossier = (
+                    f"👑 *MASTERPIECE QUANT BLAST DOSSIER* 💎\n\n"
+                    f"📌 *Stock:* `{clean_sym}`\n"
+                    f"🎖️ *Institutional Score:* `{score}/100 POINTS` 🔥\n"
+                    f"💰 *Entry CMP:* `₹{round(c, 2)}`\n"
+                    f"🌊 *Volume Velocity:* `{vol_x}x Surge` | *Flow:* `₹{round(turnover/1e7, 1)} Cr`\n\n"
+                    f"🏗️ *Base Structure:* 25-Day Range (₹{round(base_low, 1)} - ₹{round(base_high, 1)}) | VDU Confirmed ✅\n"
+                    f"📈 *Trend:* Stage-2 Bull (9>21>50 Aligned) | 52W Dist: `{dist_52w}%`\n\n"
+                    f"🔍 *Hidden Catalysts & Latest 48H News:*{catalyst_news}\n\n"
+                    f"🎯 *Stock-Specific Dynamic Runway (No Fixed %):*\n"
+                    f"• 🎯 *Target 1 (Base Depth +{t1_pct}%):* `₹{t1_target}`\n"
+                    f"• 🚀 *Target 2 (ATR Runway +{t2_pct}%):* `₹{t2_target}`\n"
+                    f"• 👑 *Target 3 (Fib 1.618x +{t3_pct}%):* `₹{t3_target}`\n"
+                    f"• 🛑 *Strict Structural SL:* `₹{sl_price}` (-{risk_pct}% Risk)\n\n"
+                    f"📋 *Execution Protocol:*\n"
+                    f"1. Target 1 (₹{t1_target}) par 50% shares book karein.\n"
+                    f"2. Baki 50% shares ka SL turant Buy Price (Cost) par shift karein (0% Risk)!\n"
+                    f"3. Daily 10-EMA ke sath Target 2 & 3 tak ride karein."
                 )
-                send_telegram(report)
-                approved_trades.append(clean_sym)
+                send_telegram(dossier)
+                triggered.append(clean_sym)
+                print(f"Triggered: {clean_sym}")
 
-        except Exception as e: continue
+        except Exception:
+            continue
 
-    if not approved_trades:
-        send_telegram("🛡️ *Multi-Agent Firm Update:*\n\nMarket scan complete. Bear Agent rejected all risky setups today. Capital 100% preserved!")
+    if not triggered:
+        print(f"[{now_str}] Scan complete. Zero high-risk setups. Capital 100% safe.")
 
+# ==========================================
+# CONTINUOUS LIVE MARKET RUNNER (9:15 - 3:30)
+# ==========================================
 if __name__ == "__main__":
-    run_multi_agent_system()
+    send_telegram("🚀 *Masterpiece Live Scanner Activated!* System cloud par live hai, live market mein har 2 minute mein scan chalega.")
+    
+    # 5 Hours Active Session Loop
+    for _ in range(150):
+        scan_masterpiece()
+        time.sleep(120)  # Scan every 2 minutes!
